@@ -1,8 +1,4 @@
-"""副本钥匙：每服务日限量发放、跨日重置、未用钥匙作废，带文本存档。
-
-缺陷：跨服务日不自动重置、切日不清理未用钥匙、同一个 req_id 重复发放、
-存档漏写未用钥匙（往返丢数据）、查询全扫玩家。
-"""
+"""副本钥匙：每服务日限量发放、跨日重置、未用钥匙作废，带文本存档。"""
 
 
 class Ledger:
@@ -17,35 +13,56 @@ class Ledger:
         self.work = 0
 
     def issue(self, req_id, player, day, at_ms):
-        """发一把钥匙，返回是否成功。缺陷：不查 req_id、不按 day 重置。"""
-        self.day = day
+        """发一把钥匙，返回是否成功。同一 req_id 幂等，跨日先清零已发计数。"""
+        if req_id in self.seen:
+            return False
+        if day < self.day:
+            return False
+        if day > self.day:
+            self.day = day
+            self.issued.clear()
         used = self.issued.get(player, 0)
         if used >= self.limit:
             return False
+        self.seen.add(req_id)
         self.issued[player] = used + 1
         self.pending[player] = self.pending.get(player, 0) + 1
         return True
 
     def use(self, player, count):
-        """用掉若干把钥匙。缺陷：不校验够不够。"""
-        self.pending[player] = self.pending.get(player, 0) - count
+        """用掉若干把钥匙，未用钥匙不足时返回 False 且不改状态。"""
+        have = self.pending.get(player, 0)
+        if count < 0 or count > have:
+            return False
+        self.pending[player] = have - count
         return True
 
     def roll_day(self, day):
-        """切到新服务日，返回作废的未用钥匙数。缺陷：不清已发计数也不作废未用钥匙。"""
+        """切到新服务日，作废全部未用钥匙并清零已发计数，返回作废数量。"""
+        if day <= self.day:
+            return 0
+        expired = sum(self.pending.values())
+        self.pending.clear()
+        self.issued.clear()
         self.day = day
-        return 0
+        return expired
 
     def remaining(self, player, day):
-        """当日还能领几把。缺陷：全扫玩家表。"""
-        self.work += len(self.issued)
+        """当日还能领几把。O(1) 查询，不全扫玩家表。"""
+        self.work += 1
+        if day > self.day:
+            return self.limit
+        if day < self.day:
+            return 0
         return self.limit - self.issued.get(player, 0)
 
     def dump(self):
-        """序列化台账。缺陷：不写未用钥匙，也不写已用记录。"""
+        """序列化台账：上限、服务日、已发计数、未用钥匙。"""
         lines = ["limit=%d" % self.limit, "day=%d" % self.day]
         for player, used in sorted(self.issued.items()):
             lines.append("issued %s %d" % (player, used))
+        for player, count in sorted(self.pending.items()):
+            lines.append("pending %s %d" % (player, count))
         return "\n".join(lines) + "\n"
 
     @classmethod
@@ -63,6 +80,9 @@ class Ledger:
             elif line.startswith("issued "):
                 _, player, used = line.split()
                 ledger.issued[player] = int(used)
+            elif line.startswith("pending "):
+                _, player, count = line.split()
+                ledger.pending[player] = int(count)
         return ledger
 
     def work_count(self):
